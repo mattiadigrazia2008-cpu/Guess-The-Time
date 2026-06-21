@@ -1,0 +1,10 @@
+{
+  "appId": "com.guessthetime.app",
+  "appName": "Guess the Time",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "backgroundColor": "#11151c",
+  "android": {
+    "backgroundColor": "#11151c"
+  }
+}
