@@ -1,0 +1,1428 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Guess the Time</title>
+<meta name="theme-color" content="#11151c" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Guess the Time" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png" />
+<style>
+  html, body, #root { margin:0; padding:0; width:100%; min-height:100vh; background:#11151c; }
+  body { -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react" data-type="module">
+const { useState, useRef, useEffect, useCallback } = React;
+
+// ---------- Palette / tokens ----------
+const COLORS = {
+  bg: "#11151c",
+  panel: "#171c25",
+  gold: "#e8b84b",
+  goldDim: "#7a6230",
+  text: "#f3eee3",
+  textDim: "#9aa3b2",
+  p1: "#d64545",
+  p1Dim: "#3a1d1d",
+  p2: "#3d7fd6",
+  p2Dim: "#192334",
+  p3: "#e0c93e",
+  p3Dim: "#3a3215",
+  p4: "#9b6bd6",
+  p4Dim: "#26193a",
+  win: "#5fbf7d",
+};
+
+const PLAYER_COLORS = [COLORS.p1, COLORS.p2, COLORS.p3, COLORS.p4];
+const PLAYER_DIMS = [COLORS.p1Dim, COLORS.p2Dim, COLORS.p3Dim, COLORS.p4Dim];
+
+function fmt(ms) {
+  const s = ms / 1000;
+  return s.toFixed(2) + "s";
+}
+
+function roundTo10(ms) {
+  return Math.round(ms / 10) * 10;
+}
+
+// Distribuzione pesata: i tempi tra 0 e 7s sono molto più frequenti,
+// quelli tra 7 e 15s spuntano raramente.
+function weightedTarget() {
+  const rare = Math.random() < 0.16;
+  const ms = rare ? 7000 + Math.random() * 8000 : 300 + Math.random() * 6700;
+  return roundTo10(ms);
+}
+
+function nextAliveIndex(lives, fromIndex) {
+  const n = lives.length;
+  let i = fromIndex;
+  for (let k = 0; k < n; k++) {
+    i = (i + 1) % n;
+    if (lives[i] > 0) return i;
+  }
+  return fromIndex;
+}
+
+// Giudica un round a N giocatori: centro esatto vale 2 punti, altrimenti
+// vince chi è più vicino (1 punto). Pareggio = nessun punto.
+function judgeRoundN(values, target) {
+  const rt = roundTo10(target);
+  const rounded = values.map((v) => roundTo10(v));
+  const diffs = rounded.map((v) => Math.abs(v - rt));
+  const exactIdx = rounded.reduce((acc, v, i) => (v === rt ? [...acc, i] : acc), []);
+  if (exactIdx.length === 1) return { winner: exactIdx[0], points: 2, diffs, exact: true };
+  if (exactIdx.length > 1) return { winner: -1, points: 0, diffs, exact: true };
+  const minDiff = Math.min(...diffs);
+  const winners = diffs.reduce((acc, d, i) => (d === minDiff ? [...acc, i] : acc), []);
+  if (winners.length === 1) return { winner: winners[0], points: 1, diffs, exact: false };
+  return { winner: -1, points: 0, diffs, exact: false };
+}
+
+// ---------- Shared icons ----------
+
+function HeartIcon({ filled, color, size = 18 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      style={{
+        transition: "transform 0.25s cubic-bezier(.34,1.56,.64,1), opacity 0.25s",
+        transform: filled ? "scale(1)" : "scale(0.86)",
+        opacity: filled ? 1 : 0.3,
+        flexShrink: 0,
+      }}
+    >
+      <path
+        d="M12 21s-7.2-4.6-10-9.2C0.2 8.6 1.6 5 5.1 4.2 7.4 3.7 9.6 4.7 12 7.5c2.4-2.8 4.6-3.8 6.9-3.3C22.4 5 23.8 8.6 22 11.8 19.2 16.4 12 21 12 21z"
+        fill={filled ? color : "none"}
+        stroke={color}
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function Hearts({ lives, color, label }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+      <div style={{ fontSize: 10, letterSpacing: 1.5, color: COLORS.textDim, textTransform: "uppercase", fontWeight: 600 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", gap: 5 }}>
+        {[0, 1, 2].map((i) => (
+          <HeartIcon key={i} filled={i < lives} color={color} size={16} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LivesRow({ lives }) {
+  return (
+    <div style={{ position: "absolute", top: 24, left: 0, right: 0, display: "flex", justifyContent: "center", gap: 24, flexWrap: "wrap", padding: "0 16px" }}>
+      {lives.map((l, i) => (
+        <Hearts key={i} lives={l} color={PLAYER_COLORS[i]} label={`giocatore ${i + 1}`} />
+      ))}
+    </div>
+  );
+}
+
+function TrophyIcon({ color, size = 64 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none">
+      <path d="M20 12h24v14a12 12 0 0 1-24 0V12z" stroke={color} strokeWidth="2.5" strokeLinejoin="round" />
+      <path d="M20 16h-7a3 3 0 0 0 0 6c1.2 2.6 3 4.4 7 5.4" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M44 16h7a3 3 0 0 1 0 6c-1.2 2.6-3 4.4-7 5.4" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M32 38v8" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M22 52h20" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M26 46h12l2 6H24l2-6z" stroke={color} strokeWidth="2.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function VerdictIcon({ kind, color }) {
+  const stroke = color;
+  return (
+    <svg width="86" height="86" viewBox="0 0 86 86" style={{ display: "block" }}>
+      <circle cx="43" cy="43" r="38" fill="none" stroke={stroke} strokeWidth="2.5" opacity="0.35" />
+      {kind === "check" && (
+        <path
+          d="M27 44 L38 55 L60 31"
+          fill="none"
+          stroke={stroke}
+          strokeWidth="5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ strokeDasharray: 60, strokeDashoffset: 60, animation: "draw-line 0.45s 0.1s ease-out forwards" }}
+        />
+      )}
+      {kind === "cross" && (
+        <>
+          <path
+            d="M29 29 L57 57"
+            fill="none"
+            stroke={stroke}
+            strokeWidth="5"
+            strokeLinecap="round"
+            style={{ strokeDasharray: 40, strokeDashoffset: 40, animation: "draw-line 0.3s 0.05s ease-out forwards" }}
+          />
+          <path
+            d="M57 29 L29 57"
+            fill="none"
+            stroke={stroke}
+            strokeWidth="5"
+            strokeLinecap="round"
+            style={{ strokeDasharray: 40, strokeDashoffset: 40, animation: "draw-line 0.3s 0.25s ease-out forwards" }}
+          />
+        </>
+      )}
+      {kind === "ring" && (
+        <>
+          <circle cx="43" cy="43" r="20" fill="none" stroke={stroke} strokeWidth="4" />
+          <circle cx="43" cy="43" r="4.5" fill={stroke} />
+        </>
+      )}
+      <style>{`@keyframes draw-line { to { stroke-dashoffset: 0; } }`}</style>
+    </svg>
+  );
+}
+
+function SoundWaveIcon({ color, size = 44 }) {
+  const bars = [10, 22, 32, 22, 10];
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64">
+      {bars.map((h, i) => (
+        <rect key={i} x={10 + i * 11} y={32 - h / 2} width="6" height={h} rx="3" fill={color} opacity={0.55 + i * 0.05} />
+      ))}
+    </svg>
+  );
+}
+
+const CONFETTI_COLORS = [COLORS.gold, "#fff5d6", COLORS.p1, COLORS.p2, COLORS.p3, COLORS.p4];
+
+function Confetti() {
+  const pieces = React.useMemo(
+    () =>
+      Array.from({ length: 60 }).map((_, i) => ({
+        id: i,
+        left: Math.random() * 100,
+        delay: Math.random() * 3,
+        duration: 2.6 + Math.random() * 2.2,
+        size: 6 + Math.random() * 8,
+        color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+        rot: Math.random() * 360,
+        drift: (Math.random() - 0.5) * 120,
+      })),
+    []
+  );
+  return (
+    <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
+      {pieces.map((p) => (
+        <span
+          key={p.id}
+          style={{
+            position: "absolute",
+            top: -20,
+            left: `${p.left}%`,
+            width: p.size,
+            height: p.size * 0.5,
+            background: p.color,
+            transform: `rotate(${p.rot}deg)`,
+            animation: `confetti-fall ${p.duration}s linear ${p.delay}s infinite`,
+            "--drift": `${p.drift}px`,
+          }}
+        />
+      ))}
+      <style>{`
+        @keyframes confetti-fall {
+          0% { transform: translate(0, -10vh) rotate(0deg); opacity: 1; }
+          100% { transform: translate(var(--drift), 115vh) rotate(540deg); opacity: 0.9; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function ExplosionOverlay({ color }) {
+  const shards = React.useMemo(
+    () =>
+      Array.from({ length: 16 }).map((_, i) => ({
+        id: i,
+        angle: (360 / 16) * i + (Math.random() * 10 - 5),
+        dist: 60 + Math.random() * 30,
+        size: 5 + Math.random() * 7,
+        delay: Math.random() * 0.08,
+      })),
+    []
+  );
+  return (
+    <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
+      <span style={{ position: "absolute", inset: 0, background: color, animation: "explosion-flash 0.55s ease-out forwards" }} />
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            width: 30,
+            height: 30,
+            marginTop: -15,
+            marginLeft: -15,
+            borderRadius: "50%",
+            border: `3px solid ${color}`,
+            animation: `explosion-ring 1s ${i * 0.13}s cubic-bezier(.16,1,.3,1) forwards`,
+          }}
+        />
+      ))}
+      {shards.map((s) => (
+        <span
+          key={s.id}
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            width: s.size,
+            height: s.size,
+            background: color,
+            borderRadius: 2,
+            "--ang": `${s.angle}deg`,
+            "--dist": `${s.dist}vmax`,
+            animation: `explosion-shard 0.9s ${s.delay}s cubic-bezier(.16,1,.3,1) forwards`,
+          }}
+        />
+      ))}
+      <style>{`
+        @keyframes explosion-flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+        @keyframes explosion-ring { 0% { transform: scale(0); opacity: 0.9; } 100% { transform: scale(14); opacity: 0; } }
+        @keyframes explosion-shard {
+          0% { transform: rotate(var(--ang)) translateX(0) scale(1); opacity: 1; }
+          100% { transform: rotate(var(--ang)) translateX(var(--dist)) scale(0); opacity: 0; }
+        }
+        @keyframes screen-shake {
+          0%, 100% { transform: translateX(0); }
+          20% { transform: translateX(-10px); }
+          40% { transform: translateX(8px); }
+          60% { transform: translateX(-6px); }
+          80% { transform: translateX(4px); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ---------- Layout base ----------
+
+const screenBase = {
+  position: "relative",
+  width: "100%",
+  height: "100%",
+  minHeight: "100vh",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  justifyContent: "center",
+  background: COLORS.bg,
+  color: COLORS.text,
+  fontFamily: "'Space Grotesk', 'Segoe UI', system-ui, -apple-system, sans-serif",
+  overflow: "hidden",
+  boxSizing: "border-box",
+  padding: 24,
+};
+
+function BackButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        position: "absolute",
+        top: 24,
+        left: 24,
+        background: "transparent",
+        border: `1px solid ${COLORS.textDim}`,
+        color: COLORS.textDim,
+        borderRadius: 999,
+        padding: "8px 18px",
+        fontSize: 14,
+        letterSpacing: 0.5,
+        cursor: "pointer",
+        fontFamily: "inherit",
+      }}
+    >
+      ← indietro
+    </button>
+  );
+}
+
+function ExitConfirmButton({ onConfirm }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <BackButton onClick={() => setOpen(true)} />
+      {open && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(8,10,14,0.72)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 50,
+            padding: 24,
+          }}
+        >
+          <div style={{ background: COLORS.panel, border: "1px solid #2a3140", borderRadius: 18, padding: "28px 26px", maxWidth: 320, textAlign: "center" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.text, marginBottom: 8 }}>Uscire dalla partita?</div>
+            <div style={{ fontSize: 14, color: COLORS.textDim, marginBottom: 22, lineHeight: 1.5 }}>
+              Il punteggio di questa partita andrà perso.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+              <button
+                onClick={() => setOpen(false)}
+                style={{ background: "transparent", border: `1px solid ${COLORS.textDim}`, color: COLORS.text, borderRadius: 999, padding: "10px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}
+              >
+                Annulla
+              </button>
+              <button
+                onClick={onConfirm}
+                style={{ background: COLORS.p1, border: "none", color: "#fff", borderRadius: 999, padding: "10px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+              >
+                Esci
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ScoreBadge({ scores }) {
+  return (
+    <div style={{ position: "absolute", top: 24, right: 24, display: "flex", gap: 8, fontFamily: "'JetBrains Mono', monospace", fontSize: 13, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: 160 }}>
+      {scores.map((s, i) => (
+        <span key={i} style={{ color: PLAYER_COLORS[i] }}>
+          P{i + 1} {s}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function RoundBadge({ round }) {
+  return (
+    <div style={{ position: "absolute", top: 24, left: "50%", transform: "translateX(-50%)", fontSize: 11, letterSpacing: 1.5, color: COLORS.textDim, textTransform: "uppercase", fontWeight: 600 }}>
+      Round {round}
+    </div>
+  );
+}
+
+function VictoryScreen({ winner, stats, extra, onBack }) {
+  const color = PLAYER_COLORS[winner - 1];
+  return (
+    <div style={{ ...screenBase, background: `radial-gradient(circle at 50% 35%, #4a3a10, ${COLORS.bg} 70%)`, overflowY: "auto" }}>
+      <Confetti />
+      <div style={{ marginBottom: 14 }}>
+        <TrophyIcon color={COLORS.gold} />
+      </div>
+      <div style={{ fontSize: 14, letterSpacing: 4, color: COLORS.gold, textTransform: "uppercase", marginBottom: 10 }}>
+        partita conclusa
+      </div>
+      <h1 style={{ fontSize: "clamp(34px, 8vw, 64px)", fontWeight: 800, margin: "0 0 10px 0", textAlign: "center", color: COLORS.text }}>
+        Giocatore <span style={{ color }}>{winner}</span> vince!
+      </h1>
+      <div style={{ fontSize: 16, color: COLORS.textDim, marginBottom: 28 }}>5 punti raggiunti</div>
+
+      {stats && stats.length > 0 && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", maxWidth: 420, marginBottom: 28, zIndex: 1 }}>
+          {stats.map((s, i) => (
+            <div key={i} style={{ background: COLORS.panel, border: "1px solid #2a3140", borderRadius: 12, padding: "10px 16px", textAlign: "center", minWidth: 92 }}>
+              <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.gold, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
+              <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: 0.5, textTransform: "uppercase", marginTop: 2 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {extra && <div style={{ zIndex: 1, width: "100%", display: "flex", justifyContent: "center" }}>{extra}</div>}
+
+      <button
+        onClick={onBack}
+        style={{ background: COLORS.gold, color: "#1a1306", border: "none", borderRadius: 999, padding: "18px 50px", fontSize: 18, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", zIndex: 1, marginTop: 10, marginBottom: 20 }}
+      >
+        Torna al menu
+      </button>
+    </div>
+  );
+}
+
+// ---------- Round-by-round tables ----------
+
+function TimeRoundsTable({ history }) {
+  if (!history.length) return null;
+  return (
+    <div style={{ width: "100%", maxWidth: 480, marginBottom: 8 }}>
+      <div style={{ fontSize: 12, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, textAlign: "center" }}>
+        Round per round
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 240, overflowY: "auto", paddingRight: 4 }}>
+        {history.map((h, i) => (
+          <div key={i} style={{ background: COLORS.panel, border: "1px solid #2a3140", borderRadius: 12, padding: "10px 14px" }}>
+            <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 6 }}>
+              Round {h.round} · bersaglio {fmt(h.target)}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {h.values.map((v, pi) => (
+                <div
+                  key={pi}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    border: h.winnerIdx === pi ? `1.5px solid ${COLORS.win}` : "1px solid transparent",
+                    background: "#11151c",
+                  }}
+                >
+                  <span style={{ fontSize: 10, color: PLAYER_COLORS[pi], fontWeight: 700 }}>P{pi + 1}</span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: COLORS.text }}>{fmt(v)}</span>
+                  <span style={{ fontSize: 10, color: COLORS.textDim }}>
+                    ±{fmt(Math.abs(roundTo10(v) - roundTo10(h.target)))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TugRoundsTable({ history }) {
+  if (!history.length) return null;
+  return (
+    <div style={{ width: "100%", maxWidth: 480, marginBottom: 8 }}>
+      <div style={{ fontSize: 12, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10, textAlign: "center" }}>
+        Round per round
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 240, overflowY: "auto", paddingRight: 4 }}>
+        {history.map((h, i) => (
+          <div key={i} style={{ background: COLORS.panel, border: "1px solid #2a3140", borderRadius: 12, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, color: COLORS.textDim }}>Round {h.round} · bersaglio {fmt(h.target)}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, color: COLORS.text }}>
+                valore finale {fmt(h.finalValue)}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: COLORS.textDim, textTransform: "uppercase" }}>{h.exact ? "centro esatto" : "ultimo in piedi"}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: PLAYER_COLORS[h.winner - 1] }}>Giocatore {h.winner}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Home / Mode select / Player count ----------
+
+function Home({ onPlay }) {
+  return (
+    <div style={screenBase}>
+      <div style={{ position: "absolute", inset: 0, background: "radial-gradient(circle at 50% 20%, rgba(232,184,75,0.08), transparent 60%)", pointerEvents: "none" }} />
+      <div style={{ fontSize: 13, letterSpacing: 4, color: COLORS.goldDim, marginBottom: 12, textTransform: "uppercase" }}>
+        un gioco di precisione fino a 4 giocatori
+      </div>
+      <h1 style={{ fontSize: "clamp(40px, 9vw, 88px)", margin: 0, fontWeight: 700, letterSpacing: -2, textAlign: "center", lineHeight: 1.02 }}>
+        Guess
+        <br />
+        the <span style={{ color: COLORS.gold }}>Time</span>
+      </h1>
+      <button
+        onClick={onPlay}
+        style={{ marginTop: 56, background: COLORS.gold, color: "#1a1306", border: "none", borderRadius: 999, padding: "20px 64px", fontSize: 22, fontWeight: 700, letterSpacing: 1, cursor: "pointer", boxShadow: "0 8px 30px rgba(232,184,75,0.25)", fontFamily: "inherit" }}
+      >
+        GIOCA
+      </button>
+    </div>
+  );
+}
+
+const MODES = [
+  { id: "replicate", title: "Replica il tempo", desc: "Memorizza un tempo (max 15s) e fermati esattamente lì, senza guardare il timer.", ready: true },
+  { id: "listen", title: "Senti e indovina", desc: "Avvia il timer e aspetta: quando suona, digita quanti secondi sono passati.", ready: true },
+  { id: "tug", title: "Non superare il bersaglio", desc: "Un timer condiviso che non si resetta: a turno fermatelo prima che superi il valore dato, senza vederlo scorrere.", ready: true },
+];
+
+function ModeSelect({ onBack, onChoose }) {
+  return (
+    <div style={screenBase}>
+      <BackButton onClick={onBack} />
+      <div style={{ fontSize: 13, letterSpacing: 3, color: COLORS.goldDim, marginBottom: 8, textTransform: "uppercase" }}>
+        scegli una modalità
+      </div>
+      <h2 style={{ fontSize: 32, margin: "0 0 36px 0", fontWeight: 700 }}>3 sfide, 5 punti per vincere</h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16, width: "min(480px, 90vw)" }}>
+        {MODES.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => m.ready && onChoose(m.id)}
+            style={{
+              textAlign: "left",
+              background: COLORS.panel,
+              border: `1px solid ${m.ready ? "#2a3140" : "#22262f"}`,
+              borderRadius: 14,
+              padding: "18px 22px",
+              cursor: m.ready ? "pointer" : "not-allowed",
+              opacity: m.ready ? 1 : 0.45,
+              color: COLORS.text,
+              fontFamily: "inherit",
+            }}
+          >
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>{m.title}</div>
+            <div style={{ fontSize: 14, color: COLORS.textDim, lineHeight: 1.4 }}>{m.desc}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlayerCountSelect({ modeTitle, onBack, onConfirm }) {
+  const [count, setCount] = useState(2);
+  return (
+    <div style={screenBase}>
+      <BackButton onClick={onBack} />
+      <div style={{ fontSize: 13, letterSpacing: 3, color: COLORS.goldDim, marginBottom: 8, textTransform: "uppercase" }}>
+        {modeTitle}
+      </div>
+      <h2 style={{ fontSize: 28, margin: "0 0 36px 0", fontWeight: 700, textAlign: "center" }}>Quanti giocatori siete?</h2>
+      <div style={{ display: "flex", gap: 14, marginBottom: 40, flexWrap: "wrap", justifyContent: "center" }}>
+        {[2, 3, 4].map((n) => (
+          <button
+            key={n}
+            onClick={() => setCount(n)}
+            style={{
+              width: 84,
+              height: 84,
+              borderRadius: 18,
+              border: count === n ? `2px solid ${COLORS.gold}` : "1px solid #2a3140",
+              background: count === n ? "#241c0c" : COLORS.panel,
+              color: COLORS.text,
+              fontSize: 26,
+              fontWeight: 800,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+            }}
+          >
+            {n}
+            <div style={{ display: "flex", gap: 3 }}>
+              {Array.from({ length: n }).map((_, i) => (
+                <span key={i} style={{ width: 7, height: 7, borderRadius: "50%", background: PLAYER_COLORS[i] }} />
+              ))}
+            </div>
+          </button>
+        ))}
+      </div>
+      <button
+        onClick={() => onConfirm(count)}
+        style={{ background: COLORS.gold, color: "#1a1306", border: "none", borderRadius: 999, padding: "18px 56px", fontSize: 18, fontWeight: 800, cursor: "pointer", fontFamily: "inherit" }}
+      >
+        Inizia
+      </button>
+    </div>
+  );
+}
+
+// ---------- Turn intro (colored handoff screen) ----------
+
+function RoundIntro({ player, onStart }) {
+  const color = PLAYER_COLORS[player - 1];
+  useEffect(() => {
+    const t = setTimeout(onStart, 1400);
+    return () => clearTimeout(t);
+  }, [onStart]);
+  return (
+    <div style={{ ...screenBase, background: color, transition: "background 0.3s" }}>
+      <div style={{ fontSize: 15, letterSpacing: 3, opacity: 0.85, marginBottom: 14, textTransform: "uppercase" }}>preparati</div>
+      <h1 style={{ fontSize: "clamp(34px, 8vw, 64px)", fontWeight: 800, margin: 0, textAlign: "center" }}>
+        Tocca al<br />giocatore {player}
+      </h1>
+    </div>
+  );
+}
+
+// ---------- Minigame 1: Replicate the time ----------
+
+function PlayingScreen({ player, target, onDone }) {
+  const [running, setRunning] = useState(false);
+  const startRef = useRef(null);
+  const color = PLAYER_COLORS[player - 1];
+  const dim = PLAYER_DIMS[player - 1];
+
+  const handlePress = () => {
+    if (!running) {
+      startRef.current = performance.now();
+      setRunning(true);
+    } else {
+      const e = performance.now() - startRef.current;
+      setRunning(false);
+      onDone(e);
+    }
+  };
+
+  return (
+    <div style={{ ...screenBase, background: COLORS.bg }}>
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(circle at 50% 30%, ${dim}, transparent 65%)`, pointerEvents: "none" }} />
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 6 }}>
+        giocatore {player} · obiettivo
+      </div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "clamp(48px, 14vw, 100px)", fontWeight: 700, color, marginBottom: 50, letterSpacing: -2 }}>
+        {(target / 1000).toFixed(2)}s
+      </div>
+      <button
+        onClick={handlePress}
+        style={{
+          width: "min(260px, 60vw)",
+          height: "min(260px, 60vw)",
+          borderRadius: "50%",
+          border: `4px solid ${color}`,
+          background: running ? color : "transparent",
+          color: running ? "#0d0f13" : color,
+          fontSize: 24,
+          fontWeight: 800,
+          letterSpacing: 1,
+          cursor: "pointer",
+          fontFamily: "inherit",
+          boxShadow: running ? `0 0 60px ${color}55` : "none",
+          transition: "background 0.15s, box-shadow 0.15s",
+        }}
+      >
+        {running ? "FERMA" : "VIA"}
+      </button>
+      <div style={{ marginTop: 36, fontSize: 13, color: COLORS.textDim, textAlign: "center", maxWidth: 320 }}>
+        {running ? "Il timer è nascosto. Fermati quando pensi di aver raggiunto il tempo." : "Premi per avviare il timer nascosto, poi premi di nuovo per fermarlo."}
+      </div>
+    </div>
+  );
+}
+
+function SoloResult({ player, target, made, onContinue, isLast }) {
+  const diff = Math.abs(made - target);
+  const color = PLAYER_COLORS[player - 1];
+  return (
+    <div style={screenBase}>
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 24 }}>
+        giocatore {player} · risultato
+      </div>
+      <div style={{ display: "flex", gap: 50, marginBottom: 30, flexWrap: "wrap", justifyContent: "center" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 6 }}>obiettivo</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 36, fontWeight: 700, color: COLORS.gold }}>{fmt(target)}</div>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 6 }}>il tuo tempo</div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 36, fontWeight: 700, color }}>{fmt(made)}</div>
+        </div>
+      </div>
+      <div style={{ fontSize: 16, color: COLORS.textDim, marginBottom: 40 }}>
+        scarto: <span style={{ color: COLORS.text, fontWeight: 700 }}>{fmt(diff)}</span>
+      </div>
+      <button
+        onClick={onContinue}
+        style={{ background: color, color: "#0d0f13", border: "none", borderRadius: 999, padding: "16px 48px", fontSize: 18, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+      >
+        {isLast ? "Vedi il risultato finale →" : "Passa il dispositivo →"}
+      </button>
+    </div>
+  );
+}
+
+function RoundResult({ target, values, scores, numPlayers, round, stats, extra, onNext, onBack }) {
+  const judge = judgeRoundN(values, target);
+  const finished = scores.some((s) => s >= 5);
+
+  if (finished) {
+    const winner = scores.findIndex((s) => s >= 5) + 1;
+    return <VictoryScreen winner={winner} stats={stats} extra={extra} onBack={onBack} />;
+  }
+
+  return (
+    <div style={screenBase}>
+      <ExitConfirmButton onConfirm={onBack} />
+      <RoundBadge round={round} />
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 20, marginTop: 30 }}>
+        confronto · obiettivo {fmt(target)}
+      </div>
+
+      <div style={{ display: "flex", gap: 20, marginBottom: 30, flexWrap: "wrap", justifyContent: "center" }}>
+        {values.map((time, p) => {
+          if (p >= numPlayers) return null;
+          const diff = judge.diffs[p];
+          const exact = roundTo10(time) === roundTo10(target);
+          const color = PLAYER_COLORS[p];
+          const isWin = judge.winner === p;
+          return (
+            <div key={p} style={{ background: COLORS.panel, border: `2px solid ${isWin ? COLORS.win : "#2a3140"}`, borderRadius: 16, padding: "20px 24px", minWidth: 140, textAlign: "center", position: "relative" }}>
+              {isWin && (
+                <div style={{ position: "absolute", top: -12, left: "50%", transform: "translateX(-50%)", background: COLORS.win, color: "#0d2616", fontSize: 10, fontWeight: 800, padding: "3px 10px", borderRadius: 999, whiteSpace: "nowrap" }}>
+                  {exact ? "CENTRO +2" : "PUNTO +1"}
+                </div>
+              )}
+              <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 8 }}>Giocatore {p + 1}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 24, fontWeight: 700, color, marginBottom: 6 }}>{fmt(time)}</div>
+              <div style={{ fontSize: 12, color: COLORS.textDim }}>scarto {fmt(diff)}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <ScoreBadge scores={scores} />
+
+      <button
+        onClick={onNext}
+        style={{ background: COLORS.gold, color: "#1a1306", border: "none", borderRadius: 999, padding: "16px 44px", fontSize: 17, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+      >
+        Prossimo round →
+      </button>
+    </div>
+  );
+}
+
+function ReplicateGame({ numPlayers, onBack }) {
+  const [phase, setPhase] = useState("intro"); // intro | play | solo | roundResult
+  const [turnIndex, setTurnIndex] = useState(0);
+  const [target, setTarget] = useState(() => weightedTarget());
+  const [values, setValues] = useState(() => Array(numPlayers).fill(0));
+  const [scores, setScores] = useState(() => Array(numPlayers).fill(0));
+  const [round, setRound] = useState(1);
+  const [history, setHistory] = useState([]);
+
+  const newRound = useCallback(() => {
+    setTarget(weightedTarget());
+    setValues(Array(numPlayers).fill(0));
+    setTurnIndex(0);
+    setRound((r) => r + 1);
+    setPhase("intro");
+  }, [numPlayers]);
+
+  const buildStats = (h) => {
+    const exactCounts = Array(numPlayers).fill(0);
+    h.forEach((r) => {
+      r.values.forEach((v, i) => {
+        if (roundTo10(v) === roundTo10(r.target)) exactCounts[i]++;
+      });
+    });
+    const avgDiff = h.length
+      ? h.reduce((sum, r) => sum + r.values.reduce((s, v) => s + Math.abs(roundTo10(v) - roundTo10(r.target)), 0) / r.values.length, 0) / h.length
+      : 0;
+    const stats = [{ label: "Round giocati", value: h.length }];
+    exactCounts.forEach((c, i) => stats.push({ label: `Centri P${i + 1}`, value: c }));
+    stats.push({ label: "Scarto medio", value: fmt(avgDiff) });
+    return stats;
+  };
+
+  const finishTurn = (val) => {
+    const newValues = [...values];
+    newValues[turnIndex] = val;
+    setValues(newValues);
+    setPhase("solo");
+  };
+
+  const afterSolo = () => {
+    if (turnIndex + 1 < numPlayers) {
+      setTurnIndex((t) => t + 1);
+      setPhase("intro");
+      return;
+    }
+    const judge = judgeRoundN(values, target);
+    if (judge.winner >= 0) {
+      setScores((s) => {
+        const ns = [...s];
+        ns[judge.winner] += judge.points;
+        return ns;
+      });
+    }
+    setHistory((h) => [...h, { round, target, values: [...values], winnerIdx: judge.winner }]);
+    setPhase("roundResult");
+  };
+
+  const currentPlayer = turnIndex + 1;
+
+  return (
+    <>
+      {phase === "intro" && <RoundIntro player={currentPlayer} onStart={() => setPhase("play")} />}
+      {phase === "play" && <PlayingScreen player={currentPlayer} target={target} onDone={finishTurn} />}
+      {phase === "solo" && (
+        <SoloResult player={currentPlayer} target={target} made={values[turnIndex]} isLast={turnIndex + 1 === numPlayers} onContinue={afterSolo} />
+      )}
+      {phase === "roundResult" && (
+        <RoundResult
+          target={target}
+          values={values}
+          scores={scores}
+          numPlayers={numPlayers}
+          round={round}
+          stats={buildStats(history)}
+          extra={<TimeRoundsTable history={history} />}
+          onNext={newRound}
+          onBack={onBack}
+        />
+      )}
+    </>
+  );
+}
+
+// ---------- Minigame 2: Listen and guess ----------
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.55);
+  } catch (e) {
+    /* audio unavailable */
+  }
+}
+
+function ReadyScreen({ player, onReady }) {
+  const color = PLAYER_COLORS[player - 1];
+  return (
+    <div style={{ ...screenBase, background: color }}>
+      <div style={{ fontSize: 15, letterSpacing: 3, opacity: 0.85, marginBottom: 14, textTransform: "uppercase" }}>giocatore {player}</div>
+      <h1 style={{ fontSize: "clamp(30px, 7vw, 54px)", fontWeight: 800, margin: "0 0 40px 0", textAlign: "center" }}>
+        Quando sei pronto<br />avvia il timer
+      </h1>
+      <button
+        onClick={() => {
+          playBeep();
+          onReady();
+        }}
+        style={{ background: "#0d0f13", color, border: "none", borderRadius: 999, padding: "22px 60px", fontSize: 22, fontWeight: 800, letterSpacing: 1, cursor: "pointer", fontFamily: "inherit" }}
+      >
+        PRONTO
+      </button>
+    </div>
+  );
+}
+
+function ListeningScreen({ player, duration, onFinished }) {
+  const color = PLAYER_COLORS[player - 1];
+  const dim = PLAYER_DIMS[player - 1];
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      playBeep();
+      setDone(true);
+      setTimeout(onFinished, 650);
+    }, duration);
+    return () => clearTimeout(t);
+  }, [duration, onFinished]);
+
+  return (
+    <div style={{ ...screenBase, background: COLORS.bg }}>
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(circle at 50% 30%, ${dim}, transparent 65%)`, pointerEvents: "none" }} />
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 30 }}>
+        giocatore {player} · ascolta
+      </div>
+      <div style={{ position: "relative", width: 160, height: 160, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {!done && (
+          <svg width="160" height="160" viewBox="0 0 160 160" style={{ position: "absolute", inset: 0, animation: "slow-spin 7s linear infinite" }}>
+            <circle cx="80" cy="80" r="76" fill="none" stroke={color} strokeWidth="3" strokeDasharray="40 200" strokeLinecap="round" opacity="0.55" />
+          </svg>
+        )}
+        <div style={{ width: 160, height: 160, borderRadius: "50%", border: `4px solid ${color}`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: done ? `0 0 70px ${color}aa` : "none", transition: "box-shadow 0.2s" }}>
+          {done ? <VerdictIcon kind="check" color={color} /> : <SoundWaveIcon color={color} />}
+        </div>
+      </div>
+      <style>{`@keyframes slow-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      <div style={{ marginTop: 36, fontSize: 14, color: COLORS.textDim, textAlign: "center", maxWidth: 300 }}>
+        {done ? "Suonato! Preparati a indovinare." : "Il timer è partito, conta mentalmente i secondi."}
+      </div>
+    </div>
+  );
+}
+
+function KeypadGuess({ player, onSubmit }) {
+  const [value, setValue] = useState("");
+  const color = PLAYER_COLORS[player - 1];
+
+  const press = (k) => {
+    playBeep();
+    if (k === "back") {
+      setValue((v) => v.slice(0, -1));
+      return;
+    }
+    if (k === ".") {
+      if (value.includes(".") || value === "") return;
+      setValue((v) => v + ".");
+      return;
+    }
+    if (value.replace(".", "").length >= 4) return;
+    setValue((v) => v + k);
+  };
+
+  const numeric = parseFloat(value);
+  const valid = value !== "" && !isNaN(numeric) && numeric >= 0 && numeric <= 60;
+
+  return (
+    <div style={screenBase}>
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 10 }}>
+        giocatore {player} · quanti secondi?
+      </div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "clamp(44px, 12vw, 72px)", fontWeight: 700, color, minHeight: 90, marginBottom: 18 }}>
+        {value === "" ? "0" : value}
+        <span style={{ fontSize: 28, color: COLORS.textDim }}>s</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, width: "min(300px, 80vw)" }}>
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "back"].map((k) => (
+          <button
+            key={k}
+            onClick={() => press(k)}
+            style={{ padding: "18px 0", fontSize: 22, fontWeight: 700, borderRadius: 12, border: `1px solid #2a3140`, background: COLORS.panel, color: COLORS.text, cursor: "pointer", fontFamily: "inherit" }}
+          >
+            {k === "back" ? "⌫" : k}
+          </button>
+        ))}
+      </div>
+      <button
+        disabled={!valid}
+        onClick={() => {
+          playBeep();
+          onSubmit(numeric * 1000);
+        }}
+        style={{ marginTop: 26, background: valid ? color : "#2a3140", color: valid ? "#0d0f13" : COLORS.textDim, border: "none", borderRadius: 999, padding: "16px 52px", fontSize: 18, fontWeight: 800, cursor: valid ? "pointer" : "not-allowed", fontFamily: "inherit" }}
+      >
+        Conferma
+      </button>
+    </div>
+  );
+}
+
+function ListenGame({ numPlayers, onBack }) {
+  const [phase, setPhase] = useState("ready"); // ready | listening | guess | roundResult
+  const [turnIndex, setTurnIndex] = useState(0);
+  const [duration, setDuration] = useState(() => weightedTarget());
+  const [values, setValues] = useState(() => Array(numPlayers).fill(0));
+  const [scores, setScores] = useState(() => Array(numPlayers).fill(0));
+  const [round, setRound] = useState(1);
+  const [history, setHistory] = useState([]);
+
+  const newRound = useCallback(() => {
+    setDuration(weightedTarget());
+    setValues(Array(numPlayers).fill(0));
+    setTurnIndex(0);
+    setRound((r) => r + 1);
+    setPhase("ready");
+  }, [numPlayers]);
+
+  const buildStats = (h) => {
+    const exactCounts = Array(numPlayers).fill(0);
+    h.forEach((r) => {
+      r.values.forEach((v, i) => {
+        if (roundTo10(v) === roundTo10(r.target)) exactCounts[i]++;
+      });
+    });
+    const avgDiff = h.length
+      ? h.reduce((sum, r) => sum + r.values.reduce((s, v) => s + Math.abs(roundTo10(v) - roundTo10(r.target)), 0) / r.values.length, 0) / h.length
+      : 0;
+    const stats = [{ label: "Round giocati", value: h.length }];
+    exactCounts.forEach((c, i) => stats.push({ label: `Centri P${i + 1}`, value: c }));
+    stats.push({ label: "Scarto medio", value: fmt(avgDiff) });
+    return stats;
+  };
+
+  const onGuess = (g) => {
+    const newValues = [...values];
+    newValues[turnIndex] = g;
+    setValues(newValues);
+    if (turnIndex + 1 < numPlayers) {
+      setTurnIndex((t) => t + 1);
+      setPhase("ready");
+      return;
+    }
+    const judge = judgeRoundN(newValues, duration);
+    if (judge.winner >= 0) {
+      setScores((s) => {
+        const ns = [...s];
+        ns[judge.winner] += judge.points;
+        return ns;
+      });
+    }
+    setHistory((h) => [...h, { round, target: duration, values: newValues, winnerIdx: judge.winner }]);
+    setPhase("roundResult");
+  };
+
+  const currentPlayer = turnIndex + 1;
+
+  return (
+    <>
+      {phase === "ready" && <ReadyScreen player={currentPlayer} onReady={() => setPhase("listening")} />}
+      {phase === "listening" && <ListeningScreen player={currentPlayer} duration={duration} onFinished={() => setPhase("guess")} />}
+      {phase === "guess" && <KeypadGuess player={currentPlayer} onSubmit={onGuess} />}
+      {phase === "roundResult" && (
+        <RoundResult
+          target={duration}
+          values={values}
+          scores={scores}
+          numPlayers={numPlayers}
+          round={round}
+          stats={buildStats(history)}
+          extra={<TimeRoundsTable history={history} />}
+          onNext={newRound}
+          onBack={onBack}
+        />
+      )}
+    </>
+  );
+}
+
+// ---------- Minigame 3: Don't Go Above ----------
+
+function TugTargetBadge({ target }) {
+  return (
+    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "clamp(34px, 8vw, 56px)", fontWeight: 800, color: COLORS.gold, marginBottom: 8 }}>
+      {fmt(target)}
+    </div>
+  );
+}
+
+function TugPlayScreen({ player, target, lives, onResult }) {
+  const [running, setRunning] = useState(false);
+  const startRef = useRef(null);
+  const color = PLAYER_COLORS[player - 1];
+  const dim = PLAYER_DIMS[player - 1];
+
+  const handlePress = () => {
+    if (!running) {
+      startRef.current = performance.now();
+      setRunning(true);
+      return;
+    }
+    const elapsed = performance.now() - startRef.current;
+    setRunning(false);
+    onResult(elapsed);
+  };
+
+  return (
+    <div style={{ ...screenBase, background: COLORS.bg }}>
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(circle at 50% 30%, ${dim}, transparent 65%)`, pointerEvents: "none" }} />
+      <LivesRow lives={lives} />
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 6, marginTop: lives.length > 2 ? 56 : 30 }}>
+        non superare
+      </div>
+      <TugTargetBadge target={target} />
+      <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 44 }}>
+        turno: <span style={{ color, fontWeight: 700 }}>giocatore {player}</span>
+      </div>
+      <button
+        onClick={handlePress}
+        style={{
+          width: "min(240px, 58vw)",
+          height: "min(240px, 58vw)",
+          borderRadius: "50%",
+          border: `4px solid ${color}`,
+          background: running ? color : "transparent",
+          color: running ? "#0d0f13" : color,
+          fontSize: 22,
+          fontWeight: 800,
+          letterSpacing: 1,
+          cursor: "pointer",
+          fontFamily: "inherit",
+          boxShadow: running ? `0 0 60px ${color}55` : "none",
+          transition: "background 0.15s, box-shadow 0.15s",
+        }}
+      >
+        {running ? "STOP" : "VIA"}
+      </button>
+      <div style={{ marginTop: 36, fontSize: 13, color: COLORS.textDim, textAlign: "center", maxWidth: 300 }}>
+        {running ? "Il timer scorre nascosto: fermalo prima di superare il bersaglio." : "Premi per far ripartire l'orologio condiviso da dove si trovava."}
+      </div>
+    </div>
+  );
+}
+
+function JudgeCall({ verdict, player, onContinue }) {
+  const playerColor = PLAYER_COLORS[player - 1];
+  const isOver = verdict === "over";
+  const isExact = verdict === "exact";
+  const accent = isExact ? COLORS.gold : isOver ? "#e2584f" : COLORS.win;
+  const icon = isExact ? "ring" : isOver ? "cross" : "check";
+
+  useEffect(() => {
+    const t = setTimeout(onContinue, isExact ? 1700 : isOver ? 1450 : 1200);
+    return () => clearTimeout(t);
+  }, [onContinue, isExact, isOver]);
+
+  return (
+    <div style={{ ...screenBase, background: COLORS.bg, animation: isOver ? "screen-shake 0.5s ease-in-out" : "none" }}>
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(circle at 50% 38%, ${accent}22, transparent 60%)`, pointerEvents: "none" }} />
+      {isOver && <ExplosionOverlay color={accent} />}
+      <div style={{ animation: "pop-in 0.3s cubic-bezier(.34,1.56,.64,1)", marginBottom: 22, zIndex: 1 }}>
+        <VerdictIcon kind={icon} color={accent} />
+      </div>
+      <h1 style={{ fontSize: "clamp(28px, 7vw, 46px)", fontWeight: 700, letterSpacing: 1, margin: "0 0 10px 0", textAlign: "center", color: accent, fontFamily: "'Space Grotesk', sans-serif", zIndex: 1 }}>
+        {isExact ? "Centrato" : isOver ? "Fuori" : "Salvo"}
+      </h1>
+      {isOver && (
+        <div style={{ fontSize: 15, color: COLORS.textDim, zIndex: 1 }}>
+          Giocatore <span style={{ color: playerColor, fontWeight: 700 }}>{player}</span> perde una vita
+        </div>
+      )}
+      {isExact && (
+        <div style={{ fontSize: 15, color: COLORS.textDim, zIndex: 1 }}>
+          Giocatore <span style={{ color: playerColor, fontWeight: 700 }}>{player}</span> vince il round all'istante · +2 punti
+        </div>
+      )}
+      {verdict === "safe" && <div style={{ fontSize: 15, color: COLORS.textDim, zIndex: 1 }}>Ancora sotto al bersaglio, si continua</div>}
+      <style>{`@keyframes pop-in { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }`}</style>
+    </div>
+  );
+}
+
+function TugResult({ target, finalValue, winnerPlayer, exact, scores, numPlayers, round, stats, extra, onNext, onBack }) {
+  const finished = scores.some((s) => s >= 5);
+  if (finished) {
+    const winner = scores.findIndex((s) => s >= 5) + 1;
+    return <VictoryScreen winner={winner} stats={stats} extra={extra} onBack={onBack} />;
+  }
+  const winnerColor = PLAYER_COLORS[winnerPlayer - 1];
+
+  return (
+    <div style={screenBase}>
+      <ExitConfirmButton onConfirm={onBack} />
+      <RoundBadge round={round} />
+      <div style={{ fontSize: 14, letterSpacing: 3, color: COLORS.textDim, textTransform: "uppercase", marginBottom: 16, marginTop: 30 }}>
+        bersaglio {fmt(target)}
+      </div>
+      <div style={{ background: COLORS.panel, border: `2px solid ${COLORS.win}`, borderRadius: 16, padding: "22px 28px", marginBottom: 24, textAlign: "center", maxWidth: 340 }}>
+        <div style={{ fontSize: 13, color: COLORS.win, fontWeight: 800, marginBottom: 8 }}>{exact ? "CENTRO ESATTO +2" : "VITTORIA ROUND +1"}</div>
+        <div style={{ fontSize: 15, color: COLORS.textDim }}>
+          {exact ? (
+            <>
+              Giocatore <span style={{ color: winnerColor, fontWeight: 700 }}>{winnerPlayer}</span> ha colpito il bersaglio alla perfezione: {fmt(finalValue)}.
+            </>
+          ) : (
+            <>
+              Gli altri giocatori hanno esaurito le vite. Il round va a <span style={{ color: winnerColor, fontWeight: 700 }}>giocatore {winnerPlayer}</span>.
+            </>
+          )}
+        </div>
+      </div>
+      <ScoreBadge scores={scores} />
+      <button
+        onClick={onNext}
+        style={{ background: COLORS.gold, color: "#1a1306", border: "none", borderRadius: 999, padding: "16px 44px", fontSize: 17, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+      >
+        Prossimo round →
+      </button>
+    </div>
+  );
+}
+
+function TugGame({ numPlayers, onBack }) {
+  const [target, setTarget] = useState(() => weightedTarget());
+  const [phase, setPhase] = useState("intro"); // intro | play | judge | result
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [scores, setScores] = useState(() => Array(numPlayers).fill(0));
+  const [lives, setLives] = useState(() => Array(numPlayers).fill(3));
+  const [accumulated, setAccumulated] = useState(0);
+  const [verdict, setVerdict] = useState("safe");
+  const [verdictPlayer, setVerdictPlayer] = useState(1);
+  const [finalValue, setFinalValue] = useState(0);
+  const [roundWinner, setRoundWinner] = useState(1);
+  const [roundExact, setRoundExact] = useState(false);
+  const [round, setRound] = useState(1);
+  const [history, setHistory] = useState([]);
+
+  const newRound = useCallback(() => {
+    setTarget(weightedTarget());
+    setLives(Array(numPlayers).fill(3));
+    setAccumulated(0);
+    setCurrentIdx(0);
+    setRound((r) => r + 1);
+    setPhase("intro");
+  }, [numPlayers]);
+
+  const buildStats = (h) => {
+    const exactHits = h.filter((r) => r.exact).length;
+    const wins = Array(numPlayers).fill(0);
+    h.forEach((r) => {
+      wins[r.winner - 1]++;
+    });
+    const stats = [{ label: "Round giocati", value: h.length }, { label: "Centri esatti", value: exactHits }];
+    wins.forEach((w, i) => stats.push({ label: `Round P${i + 1}`, value: w }));
+    return stats;
+  };
+
+  const endRound = (winnerIdx, exact, value) => {
+    const points = exact ? 2 : 1;
+    setScores((s) => {
+      const ns = [...s];
+      ns[winnerIdx] += points;
+      return ns;
+    });
+    setHistory((h) => [...h, { round, target, finalValue: value, winner: winnerIdx + 1, exact }]);
+    setRoundWinner(winnerIdx + 1);
+    setRoundExact(exact);
+    setFinalValue(value);
+    setPhase("result");
+  };
+
+  const handlePressResult = (elapsedRaw) => {
+    const total = roundTo10(accumulated + elapsedRaw);
+    setFinalValue(total);
+
+    if (total === target) {
+      setVerdict("exact");
+      setVerdictPlayer(currentIdx + 1);
+      setPhase("judge");
+      return;
+    }
+
+    if (total > target) {
+      const newLives = lives.map((l, i) => (i === currentIdx ? l - 1 : l));
+      setLives(newLives);
+      setAccumulated(0);
+      setVerdict("over");
+      setVerdictPlayer(currentIdx + 1);
+      setPhase("judge");
+      return;
+    }
+
+    setAccumulated(total);
+    setVerdict("safe");
+    setVerdictPlayer(currentIdx + 1);
+    setPhase("judge");
+  };
+
+  const handleJudgeContinue = () => {
+    if (verdict === "exact") {
+      endRound(currentIdx, true, finalValue);
+      return;
+    }
+    if (verdict === "over") {
+      const alive = lives.reduce((acc, l, i) => (l > 0 ? [...acc, i] : acc), []);
+      if (alive.length === 1) {
+        endRound(alive[0], false, finalValue);
+        return;
+      }
+      const next = nextAliveIndex(lives, currentIdx);
+      setCurrentIdx(next);
+      setPhase("intro");
+      return;
+    }
+    const next = nextAliveIndex(lives, currentIdx);
+    setCurrentIdx(next);
+    setPhase("intro");
+  };
+
+  return (
+    <>
+      {phase === "intro" && <RoundIntro player={currentIdx + 1} onStart={() => setPhase("play")} />}
+      {phase === "play" && <TugPlayScreen player={currentIdx + 1} target={target} lives={lives} onResult={handlePressResult} />}
+      {phase === "judge" && <JudgeCall verdict={verdict} player={verdictPlayer} onContinue={handleJudgeContinue} />}
+      {phase === "result" && (
+        <TugResult
+          target={target}
+          finalValue={finalValue}
+          winnerPlayer={roundWinner}
+          exact={roundExact}
+          scores={scores}
+          numPlayers={numPlayers}
+          round={round}
+          stats={buildStats(history)}
+          extra={<TugRoundsTable history={history} />}
+          onNext={newRound}
+          onBack={onBack}
+        />
+      )}
+    </>
+  );
+}
+
+// ---------- App root ----------
+
+function App() {
+  const [screen, setScreen] = useState("home"); // home | modes | playerCount | replicate | listen | tug
+  const [pendingMode, setPendingMode] = useState(null);
+  const [numPlayers, setNumPlayers] = useState(2);
+
+  const modeTitle = MODES.find((m) => m.id === pendingMode)?.title || "";
+
+  return (
+    <div style={{ width: "100%", minHeight: "100vh" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+        * { box-sizing: border-box; }
+        button:focus-visible { outline: 3px solid ${COLORS.gold}; outline-offset: 2px; }
+      `}</style>
+      {screen === "home" && <Home onPlay={() => setScreen("modes")} />}
+      {screen === "modes" && (
+        <ModeSelect
+          onBack={() => setScreen("home")}
+          onChoose={(id) => {
+            setPendingMode(id);
+            setScreen("playerCount");
+          }}
+        />
+      )}
+      {screen === "playerCount" && (
+        <PlayerCountSelect
+          modeTitle={modeTitle}
+          onBack={() => setScreen("modes")}
+          onConfirm={(n) => {
+            setNumPlayers(n);
+            setScreen(pendingMode);
+          }}
+        />
+      )}
+      {screen === "replicate" && <ReplicateGame numPlayers={numPlayers} onBack={() => setScreen("modes")} />}
+      {screen === "listen" && <ListenGame numPlayers={numPlayers} onBack={() => setScreen("modes")} />}
+      {screen === "tug" && <TugGame numPlayers={numPlayers} onBack={() => setScreen("modes")} />}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
